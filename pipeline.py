@@ -26,6 +26,7 @@ from vcpipe.compose import build_ffmpeg_command
 from vcpipe.dedup import next_topic_pool, trim_memory, fresh_clips
 from vcpipe.metadata import make_title, make_tags
 from vcpipe.subtitles import Word, group_words, build_srt
+from vcpipe.vision import parse_vision_reply, consensus_location
 
 BASE_DIR = Path(__file__).parent
 WORK_DIR = BASE_DIR / "runs"
@@ -121,8 +122,15 @@ def extract_clip_frames(clips, work_dir):
 
 
 def analyze_frames(frames):
+    """Describe each frame and decide whether ONE specific place is confidently
+    and consistently identifiable across the clips.
+
+    Returns ``(combined_description, location_or_None)``. When the footage is a
+    generic montage (no unique landmark, or clips from different places),
+    ``location`` is ``None`` and the narration must stay truthful and generic.
+    """
     key = config.require("OPENROUTER_API_KEY")
-    descs = []
+    descs, locations = [], []
     for frame in frames:
         b64 = base64.b64encode(frame.read_bytes()).decode()
         resp = requests.post(
@@ -130,28 +138,59 @@ def analyze_frames(frames):
             headers={"Authorization": f"Bearer {key}"},
             json={"model": config.VISION_MODEL, "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                {"type": "text", "text": "Describe what you see in 1-2 sentences. If you can identify a "
-                 "specific location, country, or landmark, name it. Focus on what makes this place unique."},
+                {"type": "text", "text": (
+                    "Look at this video frame. Reply in EXACTLY two lines:\n"
+                    "LOCATION: <name the specific real place/landmark/city/country ONLY if you are "
+                    "highly confident it is unmistakably identifiable from a unique, recognizable "
+                    "landmark; otherwise write UNKNOWN>\n"
+                    "DESC: <one vivid sentence describing what is visible>\n"
+                    "Never guess a location from a generic scene. A generic skyline, forest, beach, "
+                    "mountain or waterfall with no unique landmark is UNKNOWN."
+                )},
             ]}], "max_tokens": 120}, timeout=30)
-        descs.append(resp.json()["choices"][0]["message"]["content"].strip())
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        loc, desc = parse_vision_reply(text)
+        if loc:
+            locations.append(loc)
+        descs.append(desc or text)
+    location = consensus_location(locations, len(frames))
     combined = " | ".join(descs)
-    log.info(f"Vision: {combined[:120]}...")
-    return combined
+    log.info(f"Vision: location={location!r} :: {combined[:100]}...")
+    return combined, location
 
 
-def generate_script(topic, visual_desc):
+def generate_script(topic, visual_desc, location=None):
     key = config.require("OPENROUTER_API_KEY")
+    if location:
+        instruction = (
+            f"The footage clearly and consistently shows: {location}. "
+            f"Open with the hook 'This is {location}' (or a natural variant naming it). "
+            f"Include 2-3 surprising facts that are TRUE and specific to this exact place."
+        )
+    else:
+        instruction = (
+            f"The footage is a generic montage on the theme '{topic}' with NO single "
+            f"identifiable place. CRITICAL: do NOT name or invent any specific real city, "
+            f"country, landmark or building - naming one would be false since the clips are "
+            f"generic/mixed. Open with an evocative hook about the theme itself and share 2-3 "
+            f"surprising facts that are generally TRUE about {topic}, not tied to one location."
+        )
     resp = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {key}"},
         json={"model": config.SCRIPT_MODEL, "messages": [{"role": "user", "content":
-              "You are a YouTube Shorts narrator. Write a punchy voiceover (60-80 words, ~28 seconds spoken) "
-              f"for a montage about: {visual_desc}\n\n"
-              "RULES: Start with the SPECIFIC location or subject name as the hook (e.g. 'This is Whitehaven "
-              "Beach, Australia'). Include 2-3 surprising, specific facts about this place. Keep it upbeat. "
-              "End with 'Would you visit?' or similar CTA. Plain text only, no markdown, no hashtags."}],
-              "temperature": 0.85, "max_tokens": 300}, timeout=60)
+              "You are a YouTube Shorts narrator. Write a punchy voiceover (60-80 words, ~28 "
+              f"seconds spoken) for a montage. Visible content: {visual_desc}\n\n"
+              f"{instruction}\n\n"
+              "Keep it upbeat. End with 'Would you visit?' or a similar CTA. Output ONLY the final "
+              "voiceover text - no markdown, no hashtags, no alternatives, no options, no "
+              "parenthetical variants, no notes."}],
+              "temperature": 0.8, "max_tokens": 300}, timeout=60)
     script = re.sub(r"\*+|#{1,6}\s", "", resp.json()["choices"][0]["message"]["content"].strip())
+    # Strip a trailing "(Or, for a ... version: ...)" alternative block the model
+    # sometimes appends despite instructions.
+    script = re.sub(r"\n+\s*\(?\s*Or[,\s].*$", "", script, flags=re.DOTALL | re.IGNORECASE)
+    script = script.strip().strip('"').strip()
     log.info(f"Script: {script[:80]}...")
     return script
 
@@ -244,8 +283,8 @@ async def main():
     try:
         clips = download_clips(topic, work_dir)
         frames = extract_clip_frames(clips, work_dir)
-        visual = analyze_frames(frames)
-        script = generate_script(topic, visual)
+        visual, location = analyze_frames(frames)
+        script = generate_script(topic, visual, location)
         (work_dir / "script.txt").write_text(script)
         audio = work_dir / "voice.mp3"
         await generate_tts(script, audio)

@@ -51,6 +51,15 @@ topic ─▶ stock clips ─▶ vision analysis ─▶ script ─▶ TTS ─▶ 
   describes the actual footage, so a "cherry blossom" clip that is really Mount
   Yoshino gets named correctly instead of generic filler.
 
+- **No hallucinated locations (content-integrity guard).** A montage is only
+  captioned with a specific place when a *majority* of its clips independently
+  and confidently resolve to the **same** place. If the footage is generic or
+  mixed (e.g. New York + Toronto clips under a "city skyline" topic), the
+  narration stays truthful and theme-based instead of fabricating a landmark.
+  The parsing + consensus rule lives in
+  [`vcpipe/vision.py`](vcpipe/vision.py) and is unit-tested. Principle:
+  **truthful-and-general beats specific-and-false.**
+
 - **Local, word-accurate STT.** Subtitles come from faster-whisper running on
   CPU with word-level timestamps, grouped into fixed-width cues — no paid STT,
   no network dependency for captioning.
@@ -72,6 +81,7 @@ vcpipe/
   config.py      # constants, env-var loading, topic list, subtitle style
   dedup.py       # topic + clip de-duplication (pure)
   subtitles.py   # word timestamps → cues → SRT; libass sizing (pure)
+  vision.py      # parse vision replies + location consensus (pure)
   compose.py     # FFmpeg filter_complex + argv builder (pure)
   metadata.py    # YouTube title / slug / tags (pure)
 pipeline.py      # orchestration: download, vision, TTS, render, upload
@@ -83,6 +93,7 @@ tests/           # unit tests for every pure module
 **What CI covers** (deterministic, runs on every push — Python 3.10/3.11/3.12):
 
 - Topic & clip de-duplication, rotation reset, rolling-memory caps
+- Vision-reply parsing + location-consensus (no-hallucinated-place guard)
 - Subtitle grouping (exact + partial cues, timing, whitespace)
 - SRT timestamp formatting incl. millisecond rounding spill
 - libass caption-sizing math + readable-range regression guard
@@ -98,7 +109,7 @@ proves the media path.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest            # 42 tests, all green
+pytest            # 55 tests, all green
 ```
 
 ## Running the full pipeline
