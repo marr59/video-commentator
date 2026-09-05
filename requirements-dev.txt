@@ -1,0 +1,2 @@
+# CI only needs the test runner; the pure-logic modules have no heavy deps.
+pytest>=8.0

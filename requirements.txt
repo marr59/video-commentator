@@ -1,0 +1,9 @@
+# Runtime dependencies for the full pipeline (media stages).
+requests>=2.31
+edge-tts>=6.1
+faster-whisper>=1.0
+google-api-python-client>=2.100
+google-auth>=2.23
+google-auth-oauthlib>=1.1
+python-dotenv>=1.0
+# System dependency (not pip): ffmpeg + ffprobe must be on PATH.
