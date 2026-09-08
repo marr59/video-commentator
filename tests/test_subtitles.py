@@ -111,3 +111,90 @@ def test_config_font_size_is_readable():
     assert m, "SUBTITLE_STYLE must declare a FontSize"
     px = libass_rendered_px(int(m.group(1)), config.OUTPUT_H)
     assert 40 <= px <= 90, f"caption would render at {px:.0f}px (out of readable range)"
+
+
+# --- reconcile_to_script: subtitles must be verbatim from the script ---------
+
+from vcpipe.subtitles import reconcile_to_script, script_tokens
+
+
+def _asr(*texts):
+    """Build a Word stream with simple 0.5s slots from plain ASR strings."""
+    return [Word(t, i * 0.5, i * 0.5 + 0.5) for i, t in enumerate(texts)]
+
+
+def _norm_seq(text):
+    import re
+    return [re.sub(r"[^a-z0-9]", "", t.lower()) for t in text.split()]
+
+
+def test_reconcile_fixes_terraced_terrorist():
+    """The motivating incident: faster-whisper heard 'Terraced' as 'Terrorist'."""
+    script = "Terraced rice fields are nature's stairway to the sky."
+    asr = _asr("Terrorist", "rice", "fields", "are", "nature's",
+              "to", "the", "sky")
+    fixed = reconcile_to_script(asr, script)
+    assert fixed[0].text == "Terraced"
+    assert "Terrorist" not in " ".join(w.text for w in fixed)
+
+
+def test_reconcile_fixes_mangled_place_name():
+    script = "Cappadocia, Turkey is famous for hot air balloons."
+    asr = _asr("Capodosia", "Turkey", "is", "famous", "for",
+              "hot", "air", "balloons")
+    fixed = reconcile_to_script(asr, script)
+    assert fixed[0].text == "Cappadocia,"
+
+
+def test_reconcile_output_is_verbatim_script():
+    """Whatever the ASR said, the emitted words are exactly the script words."""
+    script = "Some terraces are centuries old, hand-carved into mountainsides."
+    asr = _asr("Some", "terrace", "our", "centuries", "old",
+              "hand", "craved", "into", "mountain", "sides")
+    fixed = reconcile_to_script(asr, script)
+    assert [w.text for w in fixed] == script_tokens(script)
+
+
+def test_reconcile_never_emits_word_absent_from_script():
+    script = "Peaceful terraced valleys at dawn."
+    asr = _asr("Peaceful", "Terrorist", "valleys", "at", "dawn")
+    fixed = reconcile_to_script(asr, script)
+    script_norm = set(_norm_seq(" ".join(script_tokens(script))))
+    for w in fixed:
+        import re
+        assert re.sub(r"[^a-z0-9]", "", w.text.lower()) in script_norm
+
+
+def test_reconcile_drops_hallucinated_words():
+    script = "Golden dunes roll on."
+    asr = _asr("Golden", "shiny", "dunes", "roll", "on")  # 'shiny' not in script
+    fixed = reconcile_to_script(asr, script)
+    assert [w.text for w in fixed] == ["Golden", "dunes", "roll", "on."]
+
+
+def test_reconcile_inserts_missed_words():
+    script = "The deep blue ocean."
+    asr = _asr("The", "blue", "ocean")  # ASR skipped 'deep'
+    fixed = reconcile_to_script(asr, script)
+    assert [w.text for w in fixed] == ["The", "deep", "blue", "ocean."]
+
+
+def test_reconcile_preserves_timings_for_aligned_words():
+    script = "hello world"
+    asr = [Word("hello", 1.0, 1.4), Word("world", 1.4, 2.2)]
+    fixed = reconcile_to_script(asr, script)
+    assert (fixed[0].start, fixed[0].end) == (1.0, 1.4)
+    assert (fixed[1].start, fixed[1].end) == (1.4, 2.2)
+
+
+def test_reconcile_empty_script_returns_unchanged():
+    asr = _asr("anything", "goes")
+    assert reconcile_to_script(asr, "") == asr
+
+
+def test_reconcile_feeds_group_words_cleanly():
+    """End-to-end: reconciled words group into cues carrying the fixed text."""
+    script = "Terraced rice fields nature's stairway"
+    asr = _asr("Terrorist", "rice", "fields", "nature's", "stairway")
+    cues = group_words(reconcile_to_script(asr, script), per=5)
+    assert cues[0][2] == "Terraced rice fields nature's stairway"
